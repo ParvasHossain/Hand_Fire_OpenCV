@@ -4,6 +4,7 @@ from PIL import Image
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+import math
 
 # 1. Load GIF frames
 def load_gif_frames(gif_path):
@@ -20,12 +21,28 @@ def load_gif_frames(gif_path):
         pass
     return frames
 
-# 2. Transparent Overlay Function
-def overlay_transparent(background, overlay, x, y, size=150):
+# 2. Rotate Image Function
+def rotate_image(image, angle):
+    h, w = image.shape[:2]
+    center = (w // 2, h // 2)
+    
+    # Calculate transformation matrix for rotation
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    
+    # Keep alpha channel intact during rotation
+    rotated = cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
+    return rotated
+
+# 3. Transparent Overlay Function with Rotation Support
+def overlay_transparent(background, overlay, x, y, size=150, angle=0):
     if size <= 0:
         return
     
+    # Resize first, then rotate
     overlay = cv2.resize(overlay, (size, size))
+    if angle != 0:
+        overlay = rotate_image(overlay, angle)
+
     bg_h, bg_w, _ = background.shape
     ov_h, ov_w, _ = overlay.shape
 
@@ -49,20 +66,19 @@ def overlay_transparent(background, overlay, x, y, size=150):
     blended = (1.0 - alpha) * background_crop + alpha * overlay_crop[:, :, :3]
     background[y1:y2, x1:x2] = blended
 
-# 3. Open Palm Detection (Triggers when hand is open)
+# 4. Open Palm Gesture Detection
 def is_open_palm(landmarks):
     finger_tips = [8, 12, 16, 20]
     finger_mcps = [5, 9, 13, 17]
     
     extended_fingers = 0
     for tip, mcp in zip(finger_tips, finger_mcps):
-        # Tip y-coordinate is lower than MCP joint y-coordinate when hand is raised & open
         if landmarks[tip].y < landmarks[mcp].y:
             extended_fingers += 1
             
     return extended_fingers >= 3
 
-# 4. MediaPipe Tasks API Setup (Python 3.14)
+# 5. Setup MediaPipe Tasks
 base_options = python.BaseOptions(model_asset_path='hand_landmarker.task')
 options = vision.HandLandmarkerOptions(
     base_options=base_options,
@@ -98,21 +114,35 @@ while cap.isOpened():
 
     if detection_result.hand_landmarks:
         for hand_landmarks in detection_result.hand_landmarks:
-            # Trigger fire when hand is OPEN
             if is_open_palm(hand_landmarks):
-                lm9 = hand_landmarks[9]
-                lm0 = hand_landmarks[0]
+                lm0 = hand_landmarks[0]   # Wrist
+                lm9 = hand_landmarks[9]   # Middle finger MCP joint
                 
-                cx, cy = int(lm9.x * w), int(lm9.y * h)
+                # Convert normalized coordinates to pixel values
+                x0, y0 = lm0.x * w, lm0.y * h
+                x9, y9 = lm9.x * w, lm9.y * h
                 
-                # --- FIRE SIZE ADJUSTMENT ---
-                # Increased multiplier from 1.8 to 3.2 for a much larger fire effect
+                # --- CALCULATE HAND ROTATION ANGLE ---
+                # atan2 returns angle in radians; convert to degrees
+                radians = math.atan2(y9 - y0, x9 - x0)
+                angle = math.degrees(radians) - 90  # Offset by 90 degrees so fire points upright by default
+                
+                # --- CALCULATE POSITION & OFFSET ---
+                # Calculate distance vector to shift the fire higher up towards the fingertips
+                dx = x9 - x0
+                dy = y9 - y0
+                
+                # Shift position 40% further up along the hand axis to cover whole hand
+                cx = int(x9 + dx * 0.4)
+                cy = int(y9 + dy * 0.4)
+                
+                # Dynamic sizing based on hand scale
                 hand_dist = np.sqrt((lm9.x - lm0.x)**2 + (lm9.y - lm0.y)**2)
-                fire_size = int(hand_dist * w * 3.2)
-                fire_size = max(100, fire_size)  # Set a larger minimum size (100px)
+                fire_size = int(hand_dist * w * 3.5)
+                fire_size = max(120, fire_size)
 
                 current_fire = fire_frames[fire_index]
-                overlay_transparent(frame, current_fire, cx, cy, size=fire_size)
+                overlay_transparent(frame, current_fire, cx, cy, size=fire_size, angle=-angle)
 
     fire_index = (fire_index + 1) % total_fire_frames
 
